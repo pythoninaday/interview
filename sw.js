@@ -1,5 +1,5 @@
 // Offline support: keep a copy of the app on the phone; refresh it in the background when online.
-const CACHE = 'nip-v1.1.0';
+const CACHE = 'nip-v1.1.1';
 const FILES = ['./','index.html','app.js','interview.js','content-units.js','content-cards.js','content-problems.js','manifest.webmanifest','icon-192.png','icon-512.png',
   'img/reynolds.png','img/aoa.png','img/aspect.png','img/stability.png','img/bestglide.png','img/compos.png','img/hyperbolic.png','img/carbon.png','img/payback.png','img/flight.png','img/wingload.png','img/egg.png','img/glide.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });

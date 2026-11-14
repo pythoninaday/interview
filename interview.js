@@ -70,7 +70,7 @@ function startInterview(){
     on('sub', async () => {
       const answer = $('tx').value.trim(); if (answer.length < 3){ $('ivs').textContent = 'Say or type an answer first.'; return; }
       stopMic(); $('sub').disabled = true; $('ivs').textContent = 'Marking…';
-      const res = await askGrader({id:c.id, topic:UNIT[c.u].title, q:c.q, model:c.a, pts:c.pts, history, question, answer, last:turn >= IV_FOLLOWUPS});
+      const res = await askGrader({id:c.id, topic:UNIT[c.u].title, context:UNIT[c.u].picture + ' ' + UNIT[c.u].result, q:c.q, model:c.a, pts:c.pts, history, question, answer, last:turn >= IV_FOLLOWUPS});
       if (!res.ok){
         if ($('ivs')) $('ivs').textContent = IV_ERRORS[res.error] || ('Marking failed: ' + String(res.error || 'unknown').slice(0,120));
         if ($('sub')) $('sub').disabled = false; return;
