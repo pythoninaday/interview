@@ -1,7 +1,7 @@
 'use strict';
 /* Interview Prep app. All progress lives in localStorage on this device; each finished session is also
    queued and posted to a Google Sheet (if a sync address is set) so a parent can follow progress. */
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.2.1';
 const KEY = 'nip_state_v1';
 const INTERVALS = [1, 2, 4, 7, 12];           // days until next review, by box 0..4
 const READY_BOX = 3;                           // a card counts as secure at box 3+
@@ -171,8 +171,8 @@ async function syncState(render){
     const changed = remote ? mergeRemote(remote) : false;
     const mine = JSON.stringify(syncData());
     if (mine !== r.state){ const w = await sheetCall({action:'push', profile, state:mine}); if (!w || !w.ok) throw new Error(w && w.error || 'save failed'); }
-    S.syncedAt = Date.now(); syncError = ''; save();
-    if (render && changed && !$('quit') && !$('home') && !$('sv')) route();
+    const first = !S.syncedAt; S.syncedAt = Date.now(); syncError = ''; save();
+    if (render && (changed || first) && !$('quit') && !$('home') && !$('sv')) route();
   } catch(e){ syncError = String(e && e.message || e).slice(0,80); }
   syncing = false;
   if (syncAgain){ syncAgain = false; syncState(render); }
