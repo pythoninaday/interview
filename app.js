@@ -1,7 +1,7 @@
 'use strict';
 /* Interview Prep app. All progress lives in localStorage on this device; each finished session is also
    queued and posted to a Google Sheet (if a sync address is set) so a parent can follow progress. */
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const KEY = 'nip_state_v1';
 const INTERVALS = [1, 2, 4, 7, 12];           // days until next review, by box 0..4
 const READY_BOX = 3;                           // a card counts as secure at box 3+
@@ -309,9 +309,10 @@ function vToday(){
     <button class="mode" id="bus"><span class="ic">10</span><span><b>On the bus: quick recall</b><span>${due} due · ${fresh} new · 8 questions, silent</span></span></button>
     <button class="mode" id="gap"><span class="ic">20</span><span><b>Between lessons: one derivation</b><span>Next: ${esc(su.title)}</span></span></button>
     <button class="mode" id="prob"><span class="ic">20</span><span><b>Unseen problem</b><span>Next: ${esc(np.title)} · ${Object.keys(S.probs).length}/${PROBLEMS.length} done</span></span></button>
+    <button class="mode" id="iv"><span class="ic">AI</span><span><b>Spoken interview</b><span>Answer aloud, get marked and pushed · needs signal</span></span></button>
     <button class="mode" id="iw"><span class="ic">+</span><span><b>Log an outside problem</b><span>i-want-to-study-engineering.org and others · ${S.iwtse.length} logged</span></span></button>
     <p class="muted small">${syncLine()}${storageOK ? '' : ' Warning: this browser is not saving progress.'}</p>`);
-  on('bus', () => startBus(8)); on('gap', () => startGap(su.id)); on('prob', () => startProblem(np.id)); on('iw', logIwtse);
+  on('bus', () => startBus(8)); on('gap', () => startGap(su.id)); on('prob', () => startProblem(np.id)); on('iw', logIwtse); on('iv', startInterview);
 }
 
 /* ---------- Library ---------- */
