@@ -16,7 +16,7 @@ async function askGrader(payload){
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 45000);
   try {
     const r = await fetch(S.cfg.sync, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, signal:ctl.signal,
-      body:JSON.stringify(Object.assign({action:'grade', key:S.cfg.key, device:S.cfg.device, date:today()}, payload))});
+      body:JSON.stringify(Object.assign({action:'grade', key:S.cfg.key, device:S.cfg.device, test:!!S.cfg.test, date:today()}, payload))});
     const j = JSON.parse(await r.text());
     return j && typeof j === 'object' ? j : {ok:false, error:'bad reply'};
   } catch(e){ return {ok:false, error: navigator.onLine ? 'unreachable' : 'offline'}; }

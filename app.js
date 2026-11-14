@@ -1,7 +1,7 @@
 'use strict';
 /* Interview Prep app. All progress lives in localStorage on this device; each finished session is also
    queued and posted to a Google Sheet (if a sync address is set) so a parent can follow progress. */
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.2.0';
 const KEY = 'nip_state_v1';
 const INTERVALS = [1, 2, 4, 7, 12];           // days until next review, by box 0..4
 const READY_BOX = 3;                           // a card counts as secure at box 3+
@@ -12,7 +12,7 @@ const CARD = Object.fromEntries(CARDS.map(c => [c.id, c]));
 
 /* ---------- state ---------- */
 function blank(){ return {v:1, cards:{}, units:{}, probs:{}, iwtse:[], sessions:[], queue:[],
-  cfg:{sync:'', key:'', interview:'2026-12-11', device:''}}; }
+  cfg:{sync:'', key:'', interview:'2026-12-11', interviewAt:'', device:'', test:false}, syncedAt:0, epoch:0}; }
 let S = blank(), storageOK = true;
 function load(){
   try { const raw = localStorage.getItem(KEY); if (raw) S = Object.assign(blank(), JSON.parse(raw)); S.cfg = Object.assign(blank().cfg, S.cfg); }
@@ -82,9 +82,11 @@ function logSession(mode, startedAt, items, score, detail){
   const mins = Math.min(45, Math.max(0.5, Math.round((Date.now() - startedAt)/6000)/10));
   const rec = {ts:new Date().toISOString(), date:today(), mode, mins, items, score:Math.round(score*100), detail:detail||''};
   S.sessions.push(rec);
+  // On a test device the row is still logged, but marked "test" so the sheet's summary ignores it.
+  const row = S.cfg.test && mode !== 'mock' ? Object.assign({}, rec, {mode:'test', detail:(mode + ' · ' + rec.detail).slice(0,400)}) : rec;
   S.queue.push(Object.assign({key:S.cfg.key, device:S.cfg.device, overall:Math.round(overall()*100),
-    ready:UNITS.filter(u => unitReady(u.id)).length, units:UNITS.length, streak:streak(), daysLeft:daysLeft(), app:APP_VERSION}, rec));
-  save(); flush();
+    ready:UNITS.filter(u => unitReady(u.id)).length, units:UNITS.length, streak:streak(), daysLeft:daysLeft(), app:APP_VERSION}, row));
+  save(); flush(); syncState(false);
   return rec;
 }
 let flushing = false;
@@ -100,7 +102,82 @@ async function flush(){
   } catch(e){ /* offline or blocked: keep the queue and try again later */ }
   flushing = false;
 }
-window.addEventListener('online', flush);
+window.addEventListener('online', () => { flush(); syncState(true); });
+
+/* ---------- one record across all her devices ----------
+   Progress is kept in the Google Sheet as well as on each device. Whenever the app opens, comes back to the
+   front, or finishes a session, it pulls the shared record, merges it with this device's, and pushes the result.
+   Merging is per item (the most recent review of each question wins; sessions are combined), so two devices
+   used on the same day never overwrite each other. */
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function syncData(){ return {epoch:S.epoch || 0, cards:S.cards, units:S.units, probs:S.probs, iwtse:S.iwtse, sessions:S.sessions, interview:S.cfg.interview, interviewAt:S.cfg.interviewAt || ''}; }
+const int = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(Number(v)) || 0));
+const frac01 = v => Math.max(0, Math.min(1, Number(v) || 0));
+function mergeRemote(R){
+  let changed = false; if (!R || typeof R !== 'object') return false;
+  const re = int(R.epoch, 0, 1e15);
+  if (re > (S.epoch || 0)){ const c = S.cfg, q = S.queue; S = blank(); S.cfg = c; S.queue = q; S.epoch = re; changed = true; }   // the record was wiped elsewhere
+  else if (re < (S.epoch || 0)) return false;                                                                             // remote is from before a wipe: ignore it
+  const newer = (a, b) => String(a || '') > String(b || '');
+  for (const [id, r] of Object.entries(R.cards || {})){
+    if (!CARD[id] || !r || !DATE_RE.test(r.last) || !DATE_RE.test(r.due)) continue;
+    const rc = {box:int(r.box, 0, INTERVALS.length-1), seen:int(r.seen, 1, 9999), miss:int(r.miss, 0, 9999), last:r.last, due:r.due, frac:frac01(r.frac)};
+    const lc = S.cards[id];
+    if (!lc || newer(rc.last, lc.last) || (rc.last === lc.last && rc.seen > (lc.seen || 0))){ S.cards[id] = rc; changed = true; }
+  }
+  for (const [id, r] of Object.entries(R.units || {})){
+    if (!UNIT[id] || !r || !DATE_RE.test(r.last)) continue;
+    const l = S.units[id];
+    if (!l || newer(r.last, l.last)){ S.units[id] = {last:r.last, n:Math.max(int(r.n, 1, 9999), l ? l.n || 0 : 0), steps:frac01(r.steps), say:r.say == null ? null : frac01(r.say)}; changed = true; }
+  }
+  for (const [id, r] of Object.entries(R.probs || {})){
+    if (!PROBLEMS.some(p => p.id === id) || !r || !DATE_RE.test(r.date)) continue;
+    const l = S.probs[id];
+    if (!l || newer(r.date, l.date)){ S.probs[id] = {date:r.date, hints:int(r.hints, 0, 20), frac:frac01(r.frac)}; changed = true; }
+  }
+  const ik = x => x.date + '|' + x.title + '|' + x.topic, have = new Set(S.iwtse.map(ik));
+  for (const r of Array.isArray(R.iwtse) ? R.iwtse : []){
+    if (!r || !DATE_RE.test(r.date) || typeof r.title !== 'string') continue;
+    const item = {date:r.date, title:r.title.slice(0,200), topic:String(r.topic || '').slice(0,60), mins:int(r.mins, 0, 600), frac:frac01(r.frac), note:String(r.note || '').slice(0,300)};
+    if (!have.has(ik(item))){ S.iwtse.push(item); have.add(ik(item)); changed = true; }
+  }
+  const seen = new Set(S.sessions.map(x => x.ts));
+  for (const r of Array.isArray(R.sessions) ? R.sessions : []){
+    if (!r || typeof r.ts !== 'string' || !DATE_RE.test(r.date) || seen.has(r.ts)) continue;
+    S.sessions.push({ts:r.ts.slice(0,40), date:r.date, mode:String(r.mode || '').slice(0,30), mins:Math.max(0, Math.min(600, Number(r.mins) || 0)), items:int(r.items, 0, 9999), score:int(r.score, 0, 100), detail:String(r.detail || '').slice(0,400)});
+    seen.add(r.ts); changed = true;
+  }
+  if (changed) S.sessions.sort((a, b) => a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0);
+  if (DATE_RE.test(R.interview) && newer(R.interviewAt, S.cfg.interviewAt)){ S.cfg.interview = R.interview; S.cfg.interviewAt = String(R.interviewAt).slice(0,40); changed = true; }
+  return changed;
+}
+async function sheetCall(payload){
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 30000);
+  try {
+    const r = await fetch(S.cfg.sync, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, signal:ctl.signal, body:JSON.stringify(Object.assign({key:S.cfg.key}, payload))});
+    return JSON.parse(await r.text());
+  } finally { clearTimeout(timer); }
+}
+let syncing = false, syncAgain = false, syncError = '';
+async function syncState(render){
+  if (!S.cfg.sync || !navigator.onLine) return;
+  if (syncing){ syncAgain = true; return; }
+  syncing = true;
+  try {
+    const profile = S.cfg.test ? 'test' : 'main';
+    const r = await sheetCall({action:'pull', profile});
+    if (!r || !r.ok) throw new Error(r && r.error || 'no reply');
+    let remote = null; try { remote = r.state ? JSON.parse(r.state) : null; } catch(e){}
+    const changed = remote ? mergeRemote(remote) : false;
+    const mine = JSON.stringify(syncData());
+    if (mine !== r.state){ const w = await sheetCall({action:'push', profile, state:mine}); if (!w || !w.ok) throw new Error(w && w.error || 'save failed'); }
+    S.syncedAt = Date.now(); syncError = ''; save();
+    if (render && changed && !$('quit') && !$('home') && !$('sv')) route();
+  } catch(e){ syncError = String(e && e.message || e).slice(0,80); }
+  syncing = false;
+  if (syncAgain){ syncAgain = false; syncState(render); }
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible'){ flush(); syncState(true); } });
 
 /* ---------- reusable card widget ---------- */
 // Renders one card into #cardhost. Calls done(frac) when she presses Next.
@@ -155,8 +232,10 @@ function summary(title, rec, extra){
   on('home', endSession);
 }
 function syncLine(){
-  if (!S.cfg.sync) return 'Saved on this phone. Sharing with a parent is not set up yet.';
-  return S.queue.length ? `Saved on this phone. ${S.queue.length} session(s) waiting to send when you are online.` : 'Saved and sent.';
+  if (!S.cfg.sync) return 'Saved on this device only. Linking to the shared record is not set up yet.';
+  const waiting = S.queue.length ? ` ${S.queue.length} session(s) waiting to send.` : '';
+  if (syncError) return 'Saved on this device. Could not reach the shared record just now; it will retry.' + waiting;
+  return (S.cfg.test ? 'TEST RECORD (separate from hers). ' : '') + (S.syncedAt ? 'Shared across devices. Last synced ' + new Date(S.syncedAt).toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'}) + '.' : 'Saved on this device. Syncing…') + waiting;
 }
 
 /* ---------- Bus: 10-minute recall ---------- */
@@ -311,7 +390,7 @@ function vToday(){
     <button class="mode" id="prob"><span class="ic">20</span><span><b>Unseen problem</b><span>Next: ${esc(np.title)} · ${Object.keys(S.probs).length}/${PROBLEMS.length} done</span></span></button>
     <button class="mode" id="iv"><span class="ic">AI</span><span><b>Spoken interview</b><span>Answer aloud, get marked and pushed · needs signal</span></span></button>
     <button class="mode" id="iw"><span class="ic">+</span><span><b>Log an outside problem</b><span>i-want-to-study-engineering.org and others · ${S.iwtse.length} logged</span></span></button>
-    <p class="muted small">${syncLine()}${storageOK ? '' : ' Warning: this browser is not saving progress.'}</p>`);
+    <p class="muted small">${syncLine()}${storageOK ? '' : ' Warning: this browser is not saving progress on this device.'}</p>`);
   on('bus', () => startBus(8)); on('gap', () => startGap(su.id)); on('prob', () => startProblem(np.id)); on('iw', logIwtse); on('iv', startInterview);
 }
 
@@ -363,23 +442,32 @@ function vParent(){
   show(`<h1>Parent</h1><p class="muted">Run a spoken mock interview, and set up progress sharing.</p>
     <h3>Mock interview script</h3><div class="card"><p class="small">Pick a topic. Ask each question aloud, let her talk, push with the follow-ups, and tick the points she makes without prompting.</p>
       <label for="mu">Topic</label><select id="mu">${UNITS.map(u => `<option value="${u.id}">${esc(u.title)}</option>`).join('')}</select><p><button class="primary wide" id="mock">Open script</button></p></div>
-    <h3>Progress sharing (Google Sheet)</h3><div class="card"><p class="small">Paste the web-app address of the Google Sheet script and the shared key, on HER phone. Each finished session is then added to the sheet. ${S.queue.length} waiting to send.</p>
+    <h3>Progress sharing (Google Sheet)</h3><div class="card"><p class="small">The Google Sheet holds her record so it is the same on every device, and logs each finished session. Use the setup link on each device, or paste the address and key here. ${S.queue.length} waiting to send.</p>
       <label for="su">Script address</label><input id="su" value="${esc(S.cfg.sync)}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off" autocapitalize="off">
       <label for="sk">Shared key</label><input id="sk" value="${esc(S.cfg.key)}" autocomplete="off" autocapitalize="off">
       <label for="dv">Device label (optional)</label><input id="dv" value="${esc(S.cfg.device)}" placeholder="phone" autocomplete="off">
       <label for="iv">Interview date</label><input id="iv" type="date" value="${esc(S.cfg.interview)}">
+      <label style="display:flex;gap:10px;align-items:center;color:inherit;font-size:1rem;margin-top:14px"><input id="td" type="checkbox" style="width:22px;min-height:22px;height:22px;flex:0 0 22px" ${S.cfg.test ? 'checked' : ''}> This is a parent or test device: use the separate test record, not hers</label>
       <p><button class="primary wide" id="ss">Save and send a test row</button></p><p class="small muted" id="sm" role="status"></p></div>
-    <h3>Backup</h3><div class="card"><p class="small">Progress lives on this phone. Copy this text somewhere safe to back it up, or paste a backup here to restore (for example on a new phone).</p>
+    ${S.cfg.test ? `<h3>Test record</h3><div class="card"><p class="small">Wipes the test record on every test device, so you can start a test run from nothing. Her record is not touched.</p><button class="wide" id="wipe">Wipe the test record</button><p class="small muted" id="wm" role="status"></p></div>` : ''}
+    <h3>Backup</h3><div class="card"><p class="small">Progress is kept on this device and, once linked, in the Google Sheet. Copy this text somewhere safe to back it up, or paste a backup here to restore (for example on a new phone).</p>
       <textarea id="bk" rows="4" aria-label="Backup text"></textarea><div class="row"><button id="ex">Show backup</button><button id="im">Restore from text</button></div><p class="small muted" id="bm" role="status"></p></div>
     <p class="muted small">Version ${APP_VERSION} · ${CARDS.length} questions · ${UNITS.length} topics · ${PROBLEMS.length} unseen problems</p>`);
   on('mock', () => vMock($('mu').value));
   on('ss', () => {
-    S.cfg.sync = $('su').value.trim(); S.cfg.key = $('sk').value.trim(); S.cfg.device = $('dv').value.trim(); if ($('iv').value) S.cfg.interview = $('iv').value; save();
+    S.cfg.sync = $('su').value.trim(); S.cfg.key = $('sk').value.trim(); S.cfg.device = $('dv').value.trim();
+    if ($('td').checked !== S.cfg.test){ const c = S.cfg, q = S.queue; S = blank(); S.cfg = c; S.queue = q; S.cfg.test = $('td').checked; }   // each record starts clean on this device
+    if ($('iv').value && $('iv').value !== S.cfg.interview){ S.cfg.interview = $('iv').value; S.cfg.interviewAt = new Date().toISOString(); } save(); syncState(false);
     if (!S.cfg.sync){ $('sm').textContent = 'Saved. No address set, so nothing is sent.'; return; }
     S.queue.push({key:S.cfg.key, device:S.cfg.device, ts:new Date().toISOString(), date:today(), mode:'test', mins:0, items:0, score:0, detail:'test row from the app',
       overall:Math.round(overall()*100), ready:UNITS.filter(u => unitReady(u.id)).length, units:UNITS.length, streak:streak(), daysLeft:daysLeft(), app:APP_VERSION});
     save(); $('sm').textContent = 'Sending…';
     flush().then(() => { $('sm').textContent = S.queue.length ? 'Could not send yet (offline?). It will retry.' : 'Sent. Check the sheet for a row marked "test". If none appears, the address or key is wrong.'; });
+  });
+  on('wipe', async () => {
+    if (!S.cfg.test) return; const c = S.cfg; S = blank(); S.cfg = c; S.epoch = Date.now(); save(); $('wm').textContent = 'Wiping…';
+    try { const w = S.cfg.sync ? await sheetCall({action:'push', profile:'test', state:JSON.stringify(syncData()), replace:true}) : {ok:true}; $('wm').textContent = w && w.ok ? 'Test record wiped. Other test devices clear when they next open.' : 'Wiped here, but the sheet could not be reached.'; }
+    catch(e){ $('wm').textContent = 'Wiped here, but the sheet could not be reached.'; }
   });
   on('ex', () => { $('bk').value = JSON.stringify(S); $('bk').select(); $('bm').textContent = 'Select all and copy.'; });
   on('im', () => { try { const o = JSON.parse($('bk').value); if (!o || !o.cards || !o.cfg) throw 0; S = Object.assign(blank(), o); save(); $('bm').textContent = 'Restored.'; } catch(e){ $('bm').textContent = 'That text is not a valid backup.'; } });
@@ -405,13 +493,14 @@ function route(){
   clearInterval(tick);
   let h = (location.hash || '#today').slice(1);
   if (h.startsWith('setup=')){                       // one-tap setup link: #setup=<address>|<key>
-    try { const [a,k] = decodeURIComponent(h.slice(6)).split('|'); if (/^https:\/\/script\.google\.com\//.test(a)){ S.cfg.sync = a; S.cfg.key = k || ''; save(); } } catch(e){}
+    try { const [a,k,t] = decodeURIComponent(h.slice(6)).split('|'); if (/^https:\/\/script\.google\.com\//.test(a)){ S.cfg.sync = a; S.cfg.key = k || ''; if (t === 'test'){ S.cfg.test = true; if (!S.cfg.device) S.cfg.device = 'parent'; } save(); } } catch(e){}
     history.replaceState(null, '', location.pathname + '#today'); h = 'today';
   }
   if (!ROUTES[h]) h = 'today';
+  if (Date.now() - (S.syncedAt || 0) > 60000) syncState(true);      // moving around the app also refreshes the shared record, at most once a minute
   document.querySelectorAll('#nav a').forEach(a => a.getAttribute('href') === '#'+h ? a.setAttribute('aria-current','page') : a.removeAttribute('aria-current'));
   ROUTES[h]();
 }
 window.addEventListener('hashchange', route);
-load(); route(); flush();
+load(); route(); flush(); syncState(true);
 if ('serviceWorker' in navigator && ((location.protocol === 'https:' || location.hostname === 'localhost'))) navigator.serviceWorker.register('sw.js').catch(() => {});
